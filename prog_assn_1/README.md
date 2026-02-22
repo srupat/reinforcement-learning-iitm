@@ -1,0 +1,1 @@
+Install all dependencies from requirements.txt and then run the [Jupyter Notebook](assignment_1.ipynb)
