@@ -1,2 +1,7 @@
 /.venv
 /prog_assn_1.zip
+/wandb
+/prog_assn_2/__pycache__
+/prog_assn_2/wandb_tmp
+/prog_assn_2/results
+/prog_assn_2/wandb
