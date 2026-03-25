@@ -53,6 +53,7 @@ def init_wandb_run(
         tags=tags,
         config=config,
         reinit="finish_previous",
+        settings=wandb.Settings(init_timeout=180),
     )
 
 

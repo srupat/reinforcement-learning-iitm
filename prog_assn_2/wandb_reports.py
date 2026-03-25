@@ -23,6 +23,112 @@ from wandb_utils import (
 )
 
 
+def _float_slug(value: float) -> str:
+    return str(value).replace("-", "m").replace(".", "p")
+
+
+def _top_k_table(rows: list[dict], k: int = 10) -> wandb.Table:
+    columns = ["run_label", "mean_reward", "mean_steps", "success_rate"]
+    table = wandb.Table(columns=columns)
+    for row in sorted(rows, key=lambda item: (-item["mean_reward"], item["mean_steps"], -item["success_rate"]))[:k]:
+        table.add_data(
+            row["run_label"],
+            float(row["mean_reward"]),
+            float(row["mean_steps"]),
+            float(row["success_rate"]),
+        )
+    return table
+
+
+def _best_by_experiment_rows(rows: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        grouped[row["experiment"]].append(row)
+
+    best_rows: list[dict] = []
+    for experiment, experiment_rows in grouped.items():
+        best = sorted(
+            experiment_rows,
+            key=lambda item: (-item["mean_reward"], item["mean_steps"], -item["success_rate"]),
+        )[0]
+        best_rows.append(
+            {
+                "experiment": experiment,
+                "run_label": best["run_label"],
+                "mean_reward": best["mean_reward"],
+                "mean_steps": best["mean_steps"],
+                "success_rate": best["success_rate"],
+            }
+        )
+
+    return sorted(best_rows, key=lambda item: item["experiment"])
+
+
+def _best_by_experiment_table(rows: list[dict]) -> wandb.Table:
+    columns = ["experiment", "run_label", "mean_reward", "mean_steps", "success_rate"]
+    table = wandb.Table(columns=columns)
+    for row in _best_by_experiment_rows(rows):
+        table.add_data(
+            row["experiment"],
+            row["run_label"],
+            float(row["mean_reward"]),
+            float(row["mean_steps"]),
+            float(row["success_rate"]),
+        )
+    return table
+
+
+def _alpha_gamma_heatmaps(rows: list[dict], metric_key: str) -> list[tuple[str, wandb.Image]]:
+    charts: list[tuple[str, wandb.Image]] = []
+    if not rows:
+        return charts
+
+    alphas = sorted({float(row["alpha"]) for row in rows})
+    gammas = sorted({float(row["gamma"]) for row in rows})
+    alpha_index = {value: idx for idx, value in enumerate(alphas)}
+    gamma_index = {value: idx for idx, value in enumerate(gammas)}
+
+    grouped: dict[tuple[str, float], list[dict]] = defaultdict(list)
+    for row in rows:
+        if row["exploration_strategy"] == "epsilon_greedy":
+            grouped[("epsilon", float(row["epsilon"]))].append(row)
+        else:
+            grouped[("temperature", float(row["temperature"]))].append(row)
+
+    for (param_name, param_value), group_rows in sorted(grouped.items(), key=lambda item: item[0]):
+        grid = np.full((len(alphas), len(gammas)), np.nan, dtype=float)
+        overlay = np.full((len(alphas), len(gammas)), "", dtype=object)
+
+        for row in group_rows:
+            a_idx = alpha_index[float(row["alpha"])]
+            g_idx = gamma_index[float(row["gamma"])]
+            metric = float(row[metric_key])
+            grid[a_idx, g_idx] = metric
+            overlay[a_idx, g_idx] = f"{metric:.2f}"
+
+        if np.isnan(grid).all():
+            continue
+
+        chart_key = f"{param_name}_{_float_slug(param_value)}"
+        chart_title = (
+            f"{metric_key} over alpha-gamma | {param_name}={param_value}"
+            " (rows=alpha, cols=gamma)"
+        )
+        charts.append(
+            (
+                chart_key,
+                heatmap_image(
+                    grid,
+                    title=chart_title,
+                    cmap="viridis",
+                    overlay_text=overlay,
+                ),
+            )
+        )
+
+    return charts
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Log assignment tuning plots and final analysis to Weights & Biases.")
     parser.add_argument(
@@ -135,23 +241,86 @@ def log_tuning_report(experiments: list[str], args: argparse.Namespace) -> None:
     overall_table = tuning_table(rows)
     run.log({"tuning/overall_table": overall_table})
 
+    best_experiment_table = _best_by_experiment_table(rows)
+    run.log(
+        {
+            "tuning/overall_best_by_experiment": best_experiment_table,
+            "tuning/overall_best_reward_by_experiment": wandb.plot.bar(
+                best_experiment_table,
+                "experiment",
+                "mean_reward",
+                title="Best mean reward by experiment",
+            ),
+            "tuning/overall_best_success_by_experiment": wandb.plot.bar(
+                best_experiment_table,
+                "experiment",
+                "success_rate",
+                title="Best success rate by experiment",
+            ),
+        }
+    )
+
     for experiment in experiments:
         experiment_rows = [row for row in rows if row["experiment"] == experiment]
         if not experiment_rows:
             continue
 
         table = tuning_table(experiment_rows)
-        run.log({f"tuning/{experiment}/table": table})
-        run.log(
-            {
-                f"tuning/{experiment}/reward_vs_steps": wandb.plot.scatter(
-                    table,
-                    "mean_steps",
-                    "mean_reward",
-                    title=f"{experiment}: reward vs steps",
-                )
-            }
-        )
+        top_k = _top_k_table(experiment_rows, k=10)
+        payload = {
+            f"tuning/{experiment}/table": table,
+            f"tuning/{experiment}/top_10": top_k,
+            f"tuning/{experiment}/reward_vs_steps": wandb.plot.scatter(
+                table,
+                "mean_steps",
+                "mean_reward",
+                title=f"{experiment}: reward vs steps",
+            ),
+            f"tuning/{experiment}/reward_vs_alpha": wandb.plot.scatter(
+                table,
+                "alpha",
+                "mean_reward",
+                title=f"{experiment}: reward vs alpha",
+            ),
+            f"tuning/{experiment}/reward_vs_gamma": wandb.plot.scatter(
+                table,
+                "gamma",
+                "mean_reward",
+                title=f"{experiment}: reward vs gamma",
+            ),
+            f"tuning/{experiment}/success_vs_steps": wandb.plot.scatter(
+                table,
+                "mean_steps",
+                "success_rate",
+                title=f"{experiment}: success rate vs steps",
+            ),
+            f"tuning/{experiment}/top_10_reward_bar": wandb.plot.bar(
+                top_k,
+                "run_label",
+                "mean_reward",
+                title=f"{experiment}: top 10 hyperparameter settings by reward",
+            ),
+        }
+
+        if any(row["exploration_strategy"] == "epsilon_greedy" for row in experiment_rows):
+            payload[f"tuning/{experiment}/reward_vs_epsilon"] = wandb.plot.scatter(
+                table,
+                "epsilon",
+                "mean_reward",
+                title=f"{experiment}: reward vs epsilon",
+            )
+        if any(row["exploration_strategy"] == "softmax" for row in experiment_rows):
+            payload[f"tuning/{experiment}/reward_vs_temperature"] = wandb.plot.scatter(
+                table,
+                "temperature",
+                "mean_reward",
+                title=f"{experiment}: reward vs temperature",
+            )
+
+        for key, image in _alpha_gamma_heatmaps(experiment_rows, metric_key="mean_reward"):
+            payload[f"tuning/{experiment}/alpha_gamma_heatmap_{key}"] = image
+
+        run.log(payload)
 
     run.summary["num_experiments"] = len(experiments)
     run.summary["num_rows"] = len(rows)

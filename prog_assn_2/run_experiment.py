@@ -10,10 +10,8 @@ import numpy as np
 from environment_wrapper import make_four_room_env, make_standard_grid_env
 from experiment_configs import experiment_to_dict, get_experiment_spec, list_experiment_specs
 from td_learning import TrainingResult, train_q_learning, train_sarsa
-from wandb_utils import DEFAULT_WANDB_PROJECT, init_wandb_run, log_result_summary, spec_to_wandb_config
-
-
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
+DEFAULT_WANDB_PROJECT = "rl-programming-assignment-2"
 
 
 def _format_value(value: float | int | str) -> str:
@@ -44,6 +42,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=None, help="Override the seed for this run.")
     parser.add_argument("--episodes", type=int, default=None, help="Override the number of episodes.")
+    parser.add_argument("--alpha", type=float, default=None, help="Override the learning rate.")
+    parser.add_argument("--gamma", type=float, default=None, help="Override the discount factor.")
+    parser.add_argument(
+        "--exploration-strategy",
+        type=str,
+        default=None,
+        choices=["epsilon_greedy", "softmax"],
+        help="Override the exploration strategy.",
+    )
+    parser.add_argument("--epsilon", type=float, default=None, help="Override epsilon for epsilon-greedy runs.")
+    parser.add_argument("--temperature", type=float, default=None, help="Override temperature for softmax runs.")
     parser.add_argument("--wandb", action="store_true", help="Log this run to Weights & Biases.")
     parser.add_argument("--wandb-project", type=str, default=DEFAULT_WANDB_PROJECT, help="W&B project name.")
     parser.add_argument("--wandb-entity", type=str, default=None, help="Optional W&B entity.")
@@ -81,7 +90,7 @@ def run_spec(spec, episode_logger=None) -> TrainingResult:
 
 
 def save_result(spec, result: TrainingResult) -> Path:
-    run_dir = RESULTS_DIR / spec.name / training_config_slug(spec.training_config) / f"seed_{spec.training_config.seed}"
+    run_dir = result_dir_for_spec(spec)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     metadata = experiment_to_dict(spec)
@@ -103,6 +112,15 @@ def save_result(spec, result: TrainingResult) -> Path:
         state_visit_counts=result.state_visit_counts,
     )
     return run_dir
+
+
+def result_dir_for_spec(spec) -> Path:
+    return RESULTS_DIR / spec.name / training_config_slug(spec.training_config) / f"seed_{spec.training_config.seed}"
+
+
+def result_exists(spec) -> bool:
+    run_dir = result_dir_for_spec(spec)
+    return (run_dir / "metadata.json").exists() and (run_dir / "metrics.npz").exists()
 
 
 def print_summary(spec, result: TrainingResult, run_dir: Path) -> None:
@@ -134,11 +152,23 @@ def main() -> None:
         training_config = replace(training_config, seed=args.seed)
     if args.episodes is not None:
         training_config = replace(training_config, episodes=args.episodes)
+    if args.alpha is not None:
+        training_config = replace(training_config, alpha=args.alpha)
+    if args.gamma is not None:
+        training_config = replace(training_config, gamma=args.gamma)
+    if args.exploration_strategy is not None:
+        training_config = replace(training_config, exploration_strategy=args.exploration_strategy)
+    if args.epsilon is not None:
+        training_config = replace(training_config, epsilon=args.epsilon)
+    if args.temperature is not None:
+        training_config = replace(training_config, temperature=args.temperature)
     spec = replace(spec, training_config=training_config)
 
     wandb_run = None
     episode_logger = None
     if args.wandb:
+        from wandb_utils import init_wandb_run, log_result_summary, spec_to_wandb_config
+
         tags = [spec.algorithm, spec.env_name, spec.training_config.exploration_strategy]
         wandb_run = init_wandb_run(
             project=args.wandb_project,
